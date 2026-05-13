@@ -1,0 +1,66 @@
+# VideoGeoSplat default configuration
+pipeline:
+  fps: 2
+  max_frames: 120
+  resize_long_edge: 1024
+  blur_threshold: 100.0  # Laplacian variance threshold for blur detection
+
+vggt:
+  model_path: null  # null means auto-detect or download
+  resolution: 518
+  img_load_resolution: 1024
+  use_ba: false
+  conf_thres_value: 5.0
+  max_points: 100000
+  # BA mode params (only used when use_ba: true)
+  max_reproj_error: 8.0
+  shared_camera: false
+  camera_type: "SIMPLE_PINHOLE"
+  vis_thresh: 0.2
+  query_frame_num: 8
+  max_query_pts: 4096
+  fine_tracking: true
+
+gaussian:
+  iterations: 7000
+  resolution: 1
+  white_background: false
+  sh_degree: 3
+  eval: true
+
+geometry:
+  mesh_method: "poisson"  # "poisson" or "tsdf" or "none"
+  mesh_depth: 9  # Poisson reconstruction depth
+  tsdf_voxel_size: 0.02
+
+semantic:
+  enabled: false
+  model: "grounded_sam"  # "grounded_sam", "sam2"
+  labels:
+    - wall
+    - floor
+    - table
+    - chair
+    - sofa
+    - cabinet
+    - door
+    - window
+    - plant
+    - monitor
+  label_colors:
+    wall: [200, 200, 200]
+    floor: [160, 120, 80]
+    table: [255, 120, 0]
+    chair: [0, 120, 255]
+    sofa: [180, 0, 255]
+    cabinet: [100, 80, 60]
+    door: [120, 60, 20]
+    window: [100, 200, 255]
+    plant: [0, 200, 0]
+    monitor: [50, 50, 50]
+
+demo:
+  novel_view_trajectory: "circle"  # "circle" or "spiral"
+  num_novel_views: 60
+  fps: 24
+  resolution: [1024, 768]
