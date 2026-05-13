@@ -1,4 +1,9 @@
-"""3D Gaussian Splatting integration utilities."""
+"""3D Gaussian Splatting training utilities.
+
+VGGT's run_vggt_to_3dgs.py already outputs COLMAP-compatible data
+(images/ + sparse/0/{cameras.bin, images.bin, points3D.bin, points3D.ply}),
+which 3DGS train.py can consume directly. This module wraps the training call.
+"""
 
 import os
 import sys
@@ -7,51 +12,15 @@ import numpy as np
 from videogeo.io_utils import ensure_dir
 
 
-def prepare_3dgs_input(vggt_sparse_dir: str, frames_dir: str, output_dir: str) -> str:
-    """
-    Prepare 3DGS-compatible data directory from VGGT output and frames.
-
-    The VGGT pipeline (run_vggt_to_3dgs.py) already outputs the correct
-    COLMAP format. This function ensures the directory structure is complete
-    and creates the gs_data directory with images/ and sparse/ subdirs.
-
-    Returns path to gs_data directory.
-    """
-    gs_data_dir = ensure_dir(os.path.join(output_dir, "gs_data"))
-    images_dir = ensure_dir(os.path.join(gs_data_dir, "images"))
-    sparse_dir_dst = ensure_dir(os.path.join(gs_data_dir, "sparse", "0"))
-
-    # Copy/symlink images from frames or VGGT output
-    import glob
-    import shutil
-
-    # Try frames_dir first, then vggt images
-    src_images = glob.glob(os.path.join(frames_dir, "*.png")) + \
-                 glob.glob(os.path.join(frames_dir, "*.jpg"))
-    if not src_images:
-        src_images = glob.glob(os.path.join(vggt_sparse_dir, "..", "images", "*.png")) + \
-                     glob.glob(os.path.join(vggt_sparse_dir, "..", "images", "*.jpg"))
-
-    for src in src_images:
-        dst = os.path.join(images_dir, os.path.basename(src))
-        if not os.path.exists(dst):
-            try:
-                os.symlink(os.path.abspath(src), dst)
-            except OSError:
-                shutil.copy2(src, dst)
-
-    # Copy COLMAP sparse files
-    for fname in ["cameras.bin", "images.bin", "points3D.bin", "points3D.ply"]:
-        src = os.path.join(vggt_sparse_dir, fname)
-        dst = os.path.join(sparse_dir_dst, fname)
-        if os.path.exists(src) and not os.path.exists(dst):
-            try:
-                os.symlink(os.path.abspath(src), dst)
-            except OSError:
-                shutil.copy2(src, dst)
-
-    print(f"3DGS data prepared at {gs_data_dir}")
-    return gs_data_dir
+def verify_gs_data(data_dir: str) -> bool:
+    """Verify that data_dir is valid 3DGS input (has images/ and sparse/0/)."""
+    images_ok = os.path.isdir(os.path.join(data_dir, "images"))
+    sparse_ok = os.path.isfile(os.path.join(data_dir, "sparse", "0", "cameras.bin"))
+    if not images_ok:
+        print(f"WARNING: {data_dir}/images/ not found")
+    if not sparse_ok:
+        print(f"WARNING: {data_dir}/sparse/0/cameras.bin not found")
+    return images_ok and sparse_ok
 
 
 def run_3dgs_training(gs_data_dir: str, output_dir: str, cfg: dict) -> str:
@@ -60,7 +29,13 @@ def run_3dgs_training(gs_data_dir: str, output_dir: str, cfg: dict) -> str:
 
     Calls train.py from gaussian-splatting as a subprocess.
 
-    Returns path to 3dgs output directory.
+    Args:
+        gs_data_dir: Path to COLMAP-formatted data (with images/ and sparse/0/)
+        output_dir: Parent output directory (3dgs/ will be created under it)
+        cfg: Pipeline config dict
+
+    Returns:
+        Path to 3dgs output directory (output_dir/3dgs/)
     """
     gs_cfg = cfg.get("gaussian", {})
     iterations = gs_cfg.get("iterations", 7000)
@@ -69,7 +44,7 @@ def run_3dgs_training(gs_data_dir: str, output_dir: str, cfg: dict) -> str:
     train_script = os.path.join(threedgs_root, "train.py")
     model_output_dir = ensure_dir(os.path.join(output_dir, "3dgs"))
 
-    # Build command
+    # Build command matching train.py's argument interface
     cmd = [
         sys.executable, train_script,
         "-s", os.path.abspath(gs_data_dir),
@@ -84,52 +59,57 @@ def run_3dgs_training(gs_data_dir: str, output_dir: str, cfg: dict) -> str:
     if gs_cfg.get("white_background", False):
         cmd.append("-w")
 
-    print(f"Running 3DGS training: {' '.join(cmd)}")
+    print(f"Running 3DGS training (iterations={iterations})...")
+    print(f"  Data:   {gs_data_dir}")
+    print(f"  Output: {model_output_dir}")
+
     result = subprocess.run(cmd, cwd=threedgs_root)
 
     if result.returncode != 0:
         raise RuntimeError(f"3DGS training failed with return code {result.returncode}")
 
-    # Find the latest point cloud
+    # Verify output
     pc_dir = os.path.join(model_output_dir, "point_cloud")
     if os.path.isdir(pc_dir):
         iterations_dirs = sorted([d for d in os.listdir(pc_dir) if d.startswith("iteration_")])
         if iterations_dirs:
             latest = iterations_dirs[-1]
-            print(f"3DGS training complete. Latest iteration: {latest}")
+            print(f"3DGS training complete. Final iteration: {latest}")
             return model_output_dir
 
-    raise RuntimeError("3DGS training completed but no point cloud found.")
+    raise RuntimeError("3DGS training completed but no point cloud output found.")
 
 
-def load_gaussian_ply(ply_path: str) -> tuple:
+def load_gaussian_ply(ply_path: str) -> dict:
     """
     Load a 3DGS point cloud PLY file.
 
-    Returns (xyz, features_dc, features_rest, opacity, scaling, rotation)
+    Returns dict with keys: xyz, features_dc, opacity, scaling, rotation
     """
     from plyfile import PlyData
+
     plydata = PlyData.read(ply_path)
-
     vert = plydata["vertex"]
+
     xyz = np.stack([vert["x"], vert["y"], vert["z"]], axis=-1)
-    features_dc = np.zeros((xyz.shape[0], 3, 1))
-    features_dc[:, 0, 0] = vert["f_dc_0"]
-    features_dc[:, 1, 0] = vert["f_dc_1"]
-    features_dc[:, 2, 0] = vert["f_dc_2"]
 
-    features_extra = np.zeros((xyz.shape[0], 3, 15))
-    for i in range(15):
-        key = f"f_rest_{i}"
-        if key in vert:
-            features_extra[:, 0, i] = vert[key]
-            features_extra[:, 1, i] = vert[key]
-            features_extra[:, 2, i] = vert[key]
+    features_dc = np.zeros((xyz.shape[0], 3))
+    for i, c in enumerate(["f_dc_0", "f_dc_1", "f_dc_2"]):
+        if c in vert:
+            features_dc[:, i] = vert[c]
 
-    opacity = np.array(vert["opacity"])[:, None]
-    scale_names = [n for n in vert.data.dtype.names if n.startswith("scale_")]
-    rotation_names = [n for n in vert.data.dtype.names if n.startswith("rot_")]
-    scaling = np.stack([vert[s] for s in scale_names], axis=-1)
-    rotation = np.stack([vert[r] for r in rotation_names], axis=-1)
+    opacity = np.array(vert["opacity"]) if "opacity" in vert else np.zeros(xyz.shape[0])
 
-    return xyz, features_dc, features_extra, opacity, scaling, rotation
+    scale_names = sorted([n for n in vert.data.dtype.names if n.startswith("scale_")])
+    rot_names = sorted([n for n in vert.data.dtype.names if n.startswith("rot_")])
+
+    scaling = np.stack([vert[s] for s in scale_names], axis=-1) if scale_names else np.zeros((xyz.shape[0], 3))
+    rotation = np.stack([vert[r] for r in rot_names], axis=-1) if rot_names else np.zeros((xyz.shape[0], 4))
+
+    return {
+        "xyz": xyz,
+        "features_dc": features_dc,
+        "opacity": opacity,
+        "scaling": scaling,
+        "rotation": rotation,
+    }
