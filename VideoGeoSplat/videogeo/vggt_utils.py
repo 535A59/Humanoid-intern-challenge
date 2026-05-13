@@ -44,7 +44,14 @@ def run_vggt_as_subprocess(image_dir: str, output_dir: str, cfg: dict) -> int:
         cmd.extend(["--camera_type", vggt_cfg.get("camera_type", "SIMPLE_PINHOLE")])
 
     print(f"Running VGGT: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=vggt_root)
+
+    # Ensure VGGT package is importable (add vggt_root to PYTHONPATH)
+    env = os.environ.copy()
+    existing_path = env.get("PYTHONPATH", "")
+    if vggt_root not in existing_path:
+        env["PYTHONPATH"] = f"{vggt_root}:{existing_path}" if existing_path else vggt_root
+
+    result = subprocess.run(cmd, cwd=vggt_root, env=env)
     return result.returncode
 
 
